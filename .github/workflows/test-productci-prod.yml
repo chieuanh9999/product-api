@@ -1,0 +1,270 @@
+name: Product CI Production Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:latest
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval \"db.adminCommand('ping')\""
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      PORT: 3000
+      MONGO_URI: mongodb://127.0.0.1:27017/productdb
+
+    steps:
+      # 1. Lấy source code từ GitHub
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # 2. Cài Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # 3. Cài dependency
+      - name: Install dependencies
+        run: npm ci
+
+      # 4. Khởi động Product API
+      - name: Start Product API
+        run: |
+          npm start > app.log 2>&1 &
+          echo $! > app.pid
+
+      # 5. Chờ API và MongoDB sẵn sàng
+      - name: Wait for Product API
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:3000/health; then
+              echo "Product API is ready"
+              exit 0
+            fi
+
+            echo "Waiting for Product API..."
+            sleep 2
+          done
+
+          echo "Product API failed to start"
+          cat app.log
+          exit 1
+
+      # 6. Kiểm tra healthcheck
+      - name: Test health endpoint
+        run: |
+          curl -fsS http://127.0.0.1:3000/health
+
+      # 7. CREATE Product
+      - name: Test CREATE Product
+        run: |
+          RESPONSE=$(curl -fsS \
+            -X POST http://127.0.0.1:3000/api/products \
+            -H "Content-Type: application/json" \
+            -d '{
+              "pid": "CI001",
+              "pname": "CI Product",
+              "price": 1000000,
+              "quantity": 10
+            }')
+
+          echo "$RESPONSE"
+
+          echo "$RESPONSE" | node -e "
+            let data = '';
+
+            process.stdin.on('data', chunk => data += chunk);
+
+            process.stdin.on('end', () => {
+              const result = JSON.parse(data);
+
+              if (!result.product) {
+                console.error('Product was not created');
+                process.exit(1);
+              }
+
+              if (result.product.pid !== 'CI001') {
+                console.error('Incorrect pid');
+                process.exit(1);
+              }
+
+              console.log('CREATE test passed');
+            });
+          "
+
+      # 8. READ Product
+      - name: Test READ Product
+        run: |
+          RESPONSE=$(curl -fsS \
+            http://127.0.0.1:3000/api/products/CI001)
+
+          echo "$RESPONSE"
+
+          echo "$RESPONSE" | node -e "
+            let data = '';
+
+            process.stdin.on('data', chunk => data += chunk);
+
+            process.stdin.on('end', () => {
+              const product = JSON.parse(data);
+
+              if (product.pid !== 'CI001') {
+                console.error('Product not found');
+                process.exit(1);
+              }
+
+              if (product.pname !== 'CI Product') {
+                console.error('Incorrect product name');
+                process.exit(1);
+              }
+
+              console.log('READ test passed');
+            });
+          "
+
+      # 9. UPDATE Product
+      - name: Test UPDATE Product
+        run: |
+          RESPONSE=$(curl -fsS \
+            -X PUT http://127.0.0.1:3000/api/products/CI001 \
+            -H "Content-Type: application/json" \
+            -d '{
+              "pname": "CI Product Updated",
+              "price": 2000000,
+              "quantity": 20
+            }')
+
+          echo "$RESPONSE"
+
+          echo "$RESPONSE" | node -e "
+            let data = '';
+
+            process.stdin.on('data', chunk => data += chunk);
+
+            process.stdin.on('end', () => {
+              const result = JSON.parse(data);
+
+              if (!result.product) {
+                console.error('Updated product not returned');
+                process.exit(1);
+              }
+
+              if (result.product.pname !== 'CI Product Updated') {
+                console.error('Product name was not updated');
+                process.exit(1);
+              }
+
+              if (result.product.price !== 2000000) {
+                console.error('Product price was not updated');
+                process.exit(1);
+              }
+
+              if (result.product.quantity !== 20) {
+                console.error('Product quantity was not updated');
+                process.exit(1);
+              }
+
+              console.log('UPDATE test passed');
+            });
+          "
+
+      # 10. Kiểm tra dữ liệu sau UPDATE
+      - name: Verify updated Product
+        run: |
+          RESPONSE=$(curl -fsS \
+            http://127.0.0.1:3000/api/products/CI001)
+
+          echo "$RESPONSE"
+
+          echo "$RESPONSE" | node -e "
+            let data = '';
+
+            process.stdin.on('data', chunk => data += chunk);
+
+            process.stdin.on('end', () => {
+              const product = JSON.parse(data);
+
+              if (
+                product.pid !== 'CI001' ||
+                product.pname !== 'CI Product Updated' ||
+                product.price !== 2000000 ||
+                product.quantity !== 20
+              ) {
+                console.error('Updated Product data is incorrect');
+                process.exit(1);
+              }
+
+              console.log('UPDATE verification passed');
+            });
+          "
+
+      # 11. DELETE Product
+      - name: Test DELETE Product
+        run: |
+          RESPONSE=$(curl -fsS \
+            -X DELETE http://127.0.0.1:3000/api/products/CI001)
+
+          echo "$RESPONSE"
+
+          echo "$RESPONSE" | node -e "
+            let data = '';
+
+            process.stdin.on('data', chunk => data += chunk);
+
+            process.stdin.on('end', () => {
+              const result = JSON.parse(data);
+
+              if (result.message !== 'Product deleted successfully') {
+                console.error('DELETE failed');
+                process.exit(1);
+              }
+
+              console.log('DELETE test passed');
+            });
+          "
+
+      # 12. Kiểm tra Product thực sự đã bị xóa
+      - name: Verify Product deleted
+        run: |
+          STATUS=$(curl \
+            -s \
+            -o response.json \
+            -w "%{http_code}" \
+            http://127.0.0.1:3000/api/products/CI001)
+
+          cat response.json
+
+          if [ "$STATUS" != "404" ]; then
+            echo "Expected HTTP 404 but received $STATUS"
+            exit 1
+          fi
+
+          echo "DELETE verification passed"
+
+      # 13. Test danh sách Product
+      - name: Test GET all Products
+        run: |
+          curl -fsS http://127.0.0.1:3000/api/products
+
+      # 14. Hiện log nếu workflow thất bại
+      - name: Show Product API logs on failure
+        if: failure()
+        run: |
+          echo "===== PRODUCT API LOG ====="
+          cat app.log || true
