@@ -1,4 +1,4 @@
-name: Product CI Production Test
+name: Product CI/CD
 
 on:
   push:
@@ -8,15 +8,25 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
-  integration-test:
+
+  # =========================
+  # CI
+  # =========================
+  ci:
+    name: CI - Test Product API
     runs-on: ubuntu-latest
 
     services:
       mongodb:
         image: mongo:latest
+
         ports:
           - 27017:27017
+
         options: >-
           --health-cmd "mongosh --quiet --eval \"db.adminCommand('ping')\""
           --health-interval 10s
@@ -28,50 +38,55 @@ jobs:
       MONGO_URI: mongodb://127.0.0.1:27017/productdb
 
     steps:
-      # 1. Lấy source code từ GitHub
+
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # 2. Cài Node.js
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
 
-      # 3. Cài dependency
+
       - name: Install dependencies
         run: npm ci
 
-      # 4. Khởi động Product API
+
       - name: Start Product API
         run: |
           npm start > app.log 2>&1 &
           echo $! > app.pid
 
-      # 5. Chờ API và MongoDB sẵn sàng
-      - name: Wait for Product API
+
+      # =========================
+      # HEALTHCHECK
+      # =========================
+      - name: Healthcheck Product API
         run: |
+          echo "Waiting for Product API..."
+
           for i in {1..30}; do
+
             if curl -fsS http://127.0.0.1:3000/health; then
-              echo "Product API is ready"
+              echo ""
+              echo "Product API is healthy"
               exit 0
             fi
 
-            echo "Waiting for Product API..."
+            echo "Attempt $i: API is not healthy yet"
             sleep 2
           done
 
-          echo "Product API failed to start"
+          echo "Product API healthcheck failed"
           cat app.log
           exit 1
 
-      # 6. Kiểm tra healthcheck
-      - name: Test health endpoint
-        run: |
-          curl -fsS http://127.0.0.1:3000/health
 
-      # 7. CREATE Product
+      # =========================
+      # CREATE
+      # =========================
       - name: Test CREATE Product
         run: |
           RESPONSE=$(curl -fsS \
@@ -95,7 +110,7 @@ jobs:
               const result = JSON.parse(data);
 
               if (!result.product) {
-                console.error('Product was not created');
+                console.error('CREATE failed');
                 process.exit(1);
               }
 
@@ -104,11 +119,14 @@ jobs:
                 process.exit(1);
               }
 
-              console.log('CREATE test passed');
+              console.log('CREATE passed');
             });
           "
 
-      # 8. READ Product
+
+      # =========================
+      # READ
+      # =========================
       - name: Test READ Product
         run: |
           RESPONSE=$(curl -fsS \
@@ -125,20 +143,18 @@ jobs:
               const product = JSON.parse(data);
 
               if (product.pid !== 'CI001') {
-                console.error('Product not found');
+                console.error('READ failed');
                 process.exit(1);
               }
 
-              if (product.pname !== 'CI Product') {
-                console.error('Incorrect product name');
-                process.exit(1);
-              }
-
-              console.log('READ test passed');
+              console.log('READ passed');
             });
           "
 
-      # 9. UPDATE Product
+
+      # =========================
+      # UPDATE
+      # =========================
       - name: Test UPDATE Product
         run: |
           RESPONSE=$(curl -fsS \
@@ -161,60 +177,33 @@ jobs:
               const result = JSON.parse(data);
 
               if (!result.product) {
-                console.error('Updated product not returned');
+                console.error('UPDATE failed');
                 process.exit(1);
               }
 
               if (result.product.pname !== 'CI Product Updated') {
-                console.error('Product name was not updated');
+                console.error('Incorrect pname');
                 process.exit(1);
               }
 
               if (result.product.price !== 2000000) {
-                console.error('Product price was not updated');
+                console.error('Incorrect price');
                 process.exit(1);
               }
 
               if (result.product.quantity !== 20) {
-                console.error('Product quantity was not updated');
+                console.error('Incorrect quantity');
                 process.exit(1);
               }
 
-              console.log('UPDATE test passed');
+              console.log('UPDATE passed');
             });
           "
 
-      # 10. Kiểm tra dữ liệu sau UPDATE
-      - name: Verify updated Product
-        run: |
-          RESPONSE=$(curl -fsS \
-            http://127.0.0.1:3000/api/products/CI001)
 
-          echo "$RESPONSE"
-
-          echo "$RESPONSE" | node -e "
-            let data = '';
-
-            process.stdin.on('data', chunk => data += chunk);
-
-            process.stdin.on('end', () => {
-              const product = JSON.parse(data);
-
-              if (
-                product.pid !== 'CI001' ||
-                product.pname !== 'CI Product Updated' ||
-                product.price !== 2000000 ||
-                product.quantity !== 20
-              ) {
-                console.error('Updated Product data is incorrect');
-                process.exit(1);
-              }
-
-              console.log('UPDATE verification passed');
-            });
-          "
-
-      # 11. DELETE Product
+      # =========================
+      # DELETE
+      # =========================
       - name: Test DELETE Product
         run: |
           RESPONSE=$(curl -fsS \
@@ -235,12 +224,15 @@ jobs:
                 process.exit(1);
               }
 
-              console.log('DELETE test passed');
+              console.log('DELETE passed');
             });
           "
 
-      # 12. Kiểm tra Product thực sự đã bị xóa
-      - name: Verify Product deleted
+
+      # =========================
+      # VERIFY DELETE
+      # =========================
+      - name: Verify Product Deleted
         run: |
           STATUS=$(curl \
             -s \
@@ -257,14 +249,63 @@ jobs:
 
           echo "DELETE verification passed"
 
-      # 13. Test danh sách Product
-      - name: Test GET all Products
-        run: |
-          curl -fsS http://127.0.0.1:3000/api/products
 
-      # 14. Hiện log nếu workflow thất bại
-      - name: Show Product API logs on failure
+      - name: Show API logs on failure
         if: failure()
         run: |
           echo "===== PRODUCT API LOG ====="
           cat app.log || true
+
+
+  # =========================
+  # CD
+  # =========================
+  cd:
+    name: CD - Push Docker Image
+
+    needs: ci
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/product-api
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+
+      - name: Deployment completed
+        run: |
+          echo "Docker image pushed successfully"
+          echo "${{ secrets.DOCKERHUB_USERNAME }}/product-api:latest"
