@@ -364,7 +364,7 @@ jobs:
                   }
               }
               catch {
-                  Write-Host "Attempt $i: API is not ready yet"
+                  Write-Host "Attempt ${i}: API is not ready yet"
               }
 
               Start-Sleep -Seconds 2
